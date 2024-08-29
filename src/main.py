@@ -1,227 +1,200 @@
+from bs4 import BeautifulSoup
+import requests
+import csv
+import time
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+import math
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-import time
+from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import StaleElementReferenceException
 import os
-import re
+import pandas as pd
+from datetime import timedelta
+from dateutil import parser
+import yfinance as yf
 
 
-def reklama(element):
-    print("ez")
 
+headers = {
+        "User-Agent": "Java-http-client/"
+    }
+base_url = 'https://www.nasdaq.com'
 
-driver = webdriver.Chrome()
-
-actions = ActionChains(driver)
-
-driver.get("https://www.nasdaq.com/market-activity/quotes/press-releases")
-
-# Kliknij w zgodę
-WebDriverWait(driver , 5).until(
-    EC.presence_of_element_located((By.XPATH, '//button[@id="onetrust-accept-btn-handler"]'))
-)
-acceptance = driver.find_element(By.XPATH, '//button[@id="onetrust-accept-btn-handler"]')
-acceptance.click()
-
-# znajdź tabele z firmami
-WebDriverWait(driver , 5).until(
-    EC.presence_of_element_located((By.ID, 'tablefield-paragraph-8371281-field_table-0'))
-)
-table = driver.find_element(By.ID, 'tablefield-paragraph-8371281-field_table-0')
-
-# znajdź wszystkie linki w tabeli
-WebDriverWait(table , 5).until(
-    EC.presence_of_element_located((By.TAG_NAME, 'a'))
-)
-links = table.find_elements(By.TAG_NAME, 'a')
-
-links_to_click = links[1::2]
-
-for index, link in enumerate(links_to_click):
-    link.click()
-    try:
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.CLASS_NAME, 'jupiter22-c-nav__title'))
-        )
-        div_element = driver.find_element(By.CLASS_NAME, 'jupiter22-c-nav__title')
-    except:
-        driver.refresh()
-
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.ID, 'tablefield-paragraph-8371281-field_table-0'))
-        )
-        table = driver.find_element(By.ID, 'tablefield-paragraph-8371281-field_table-0')
-
-        WebDriverWait(table, 5).until(
-            EC.presence_of_element_located((By.TAG_NAME, 'a'))
-        )
-        links = table.find_elements(By.TAG_NAME, 'a')
-        links_to_click = links[1::2]
-        link = links_to_click[index]
-        link.click()
-
-    WebDriverWait(driver, 5).until(
-        EC.presence_of_element_located((By.CLASS_NAME, 'jupiter22-c-nav__title'))
+def get_links(link):
+    data_links = []
+    driver = webdriver.Chrome()
+    driver.get(link)
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.XPATH, "//div[@class='results-info']"))
     )
-    div_element = driver.find_element(By.CLASS_NAME, 'jupiter22-c-nav__title')
+    results_info = driver.find_element(By.XPATH, "//div[@class='results-info']")
+    max_number = results_info.text.split()[5]
+    page_number = math.ceil((int(max_number) / 10))
+    i = 1
+    while i <= page_number:
+        current_page = f'{link}?page={i}&rows_per_page=10'
+        driver.get(current_page)
+        driver.implicitly_wait(30)
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper'))
+        )
+        time.sleep(2)
+        article_links = driver.find_elements(By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper')
+        try_again = False
+        for linkin in article_links:
+            try:
+                href = linkin.get_attribute('href')
+                if href is None:
+                    try_again = True
+                    break
+                data_links.append(href)
+            except StaleElementReferenceException:
+                print(f'Stale element encountered on page {i}, refreshing...')
+                driver.refresh()
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper'))
+                )
+                article_links = driver.find_elements(By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper')
+                for linkin in article_links:
+                    try:
+                        href = linkin.get_attribute('href')
+                        data_links.append(href)
+                    except StaleElementReferenceException:
+                        continue
 
-    WebDriverWait(div_element, 5).until(
-        EC.presence_of_element_located((By.TAG_NAME, 'h3'))
-    )
-    h3_element = div_element.find_element(By.TAG_NAME, 'h3')
+        if try_again:
+            print(f"Retrying page {i} due to missing or stale element...")
+            continue
+        i += 1
 
-    # Pobierz tekst z h3 tagu
-    text_content = h3_element.text.strip()
+    driver.quit()
 
-    # Utwórz folder o nazwie "AMD", jeśli jeszcze nie istnieje
-    folder_name = text_content
+    return data_links
+
+def scrape_news(data, folder_name):
+
     if not os.path.exists(folder_name):
-        os.makedirs(folder_name)
-    os.chdir(folder_name)
+        os.makedirs(folder_name, exist_ok=True)
+        print(f"Folder '{folder_name}' został utworzony.")
+    for firma, urls in data.items():
+        csv_file_path = os.path.join(folder_name, f'{firma}.csv')
+        with open(csv_file_path, 'w', newline='', encoding='utf-8') as csv_file:
+            csv_writer = csv.writer(csv_file)
+            csv_writer.writerow(['Title', 'Published Date', 'Content'])
+        for i in urls:
+            response = requests.get(i, headers=headers)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            date_element = soup.find('time', class_='timestamp__date')
+            date_text = date_element.text.strip()
+            title_element = soup.find('h1', class_='press-release-header__title')
+            title_text = title_element.text.strip()
+            div_content = soup.find('div', class_='body__content')
+            text = div_content.get_text(separator="\n")
 
-    while True:
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.CLASS_NAME, 'jupiter22-c-article-list'))
-        )
-        ul_element = driver.find_element(By.CLASS_NAME, 'jupiter22-c-article-list')
-
-        WebDriverWait(ul_element, 5).until(
-            EC.presence_of_element_located((By.TAG_NAME, 'a'))
-        )
-        articles_to_click = ul_element.find_elements(By.TAG_NAME, 'a')
-        for article_index in range(len(articles_to_click)):
-
-            WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CLASS_NAME, 'jupiter22-c-article-list'))
-            )
-            ul_element = driver.find_element(By.CLASS_NAME, 'jupiter22-c-article-list')
-
-            WebDriverWait(ul_element, 5).until(
-                EC.presence_of_element_located((By.TAG_NAME, 'a'))
-            )
-            articles_to_click = ul_element.find_elements(By.TAG_NAME, 'a')
-
-            try:
-                print(len(articles_to_click))
-                driver.execute_script("arguments[0].scrollIntoView(true);", articles_to_click[article_index])
-                driver.execute_script("arguments[0].click();", articles_to_click[article_index])
-            except:
-                actions.send_keys(Keys.PAGE_UP).perform()
-                time.sleep(3)
-                actions.send_keys(Keys.ARROW_UP).perform()
-                time.sleep(2)
-                WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, 'jupiter22-c-article-list'))
-                )
-                ul_element = driver.find_element(By.CLASS_NAME, 'jupiter22-c-article-list')
-
-                WebDriverWait(ul_element, 5).until(
-                    EC.presence_of_element_located((By.TAG_NAME, 'a'))
-                )
-                articles_to_click = ul_element.find_elements(By.TAG_NAME, 'a')
-                driver.execute_script("arguments[0].scrollIntoView(true);", articles_to_click[article_index])
-                driver.execute_script("arguments[0].click();", articles_to_click[article_index])
-
-            try:
-                WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, 'press-release-header__title'))
-                )
-                h1_element = driver.find_element(By.CLASS_NAME, 'press-release-header__title')
-            except:
-                actions.send_keys(Keys.PAGE_UP).perform()
-                time.sleep(2)
-
-                WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, 'jupiter22-c-article-list'))
-                )
-                ul_element = driver.find_element(By.CLASS_NAME, 'jupiter22-c-article-list')
-
-                WebDriverWait(ul_element, 5).until(
-                    EC.presence_of_element_located((By.TAG_NAME, 'a'))
-                )
-                articles_to_click = ul_element.find_elements(By.TAG_NAME, 'a')
-                driver.execute_script("arguments[0].scrollIntoView(true);", articles_to_click[article_index])
-                driver.execute_script("arguments[0].click();", articles_to_click[article_index])
+            with open(csv_file_path, 'a', newline='', encoding='utf-8') as csv_file:
+                csv_writer = csv.writer(csv_file)
+                csv_writer.writerow([title_text, date_text, text])
 
 
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, 'press-release-header__title'))
-            )
-            h1_element = driver.find_element(By.CLASS_NAME, 'press-release-header__title')
-            file_name = h1_element.text.strip()
-            file_name = re.sub(r'[^\w\s]', '', file_name).replace(' ', '_') + '.txt'
-            file_path = os.path.join(folder_name, file_name)
+def main():
 
-            WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CLASS_NAME, 'body__content'))
-            )
-            body_content = driver.find_element(By.CLASS_NAME, 'body__content')
+    category_url = f'{base_url}/market-activity/quotes/press-releases'
+    response = requests.get(category_url, headers=headers)
+    data_links = []
+    short_names = []
+    data = {}
 
-            WebDriverWait(body_content, 5).until(
-                EC.presence_of_element_located((By.TAG_NAME, 'p'))
-            )
-            paragraphs = body_content.find_elements(By.TAG_NAME, 'p')
-            accumulated_text = ''
-            for paragraph in paragraphs:
-                paragraph_text = paragraph.text
-                accumulated_text += paragraph_text + '\n'
+    if response.status_code == 200:
 
-            if not os.path.exists(file_name):
-                # Jeśli plik nie istnieje, utwórz go i zapisz w nim treść
-                with open(file_name, 'w', encoding='utf-8') as file:
-                    file.write(accumulated_text)
-                    print(f"Plik {file_name} został utworzony i zapisano w folderze {folder_name}.")
-            else:
-                print(f"Plik {file_name} już istnieje w folderze {folder_name}.")
+        # parse HTML content with BeautifulSoup
+        soup = BeautifulSoup(response.content, 'html.parser')
+        table = soup.find('table', id='tablefield-paragraph-8371281-field_table-0')
 
-            driver.back()
+        for row in table.find_all('tr'):
+            short_names.append(row.text.strip().split('\n')[0])
 
 
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, 'results-info'))
-        )
-        numbers = driver.find_element(By.CLASS_NAME, 'results-info')
-        condition = numbers.text
-        if condition == '':
-            actions.send_keys(Keys.PAGE_UP).perform()
-            time.sleep(2)
-            actions.send_keys(Keys.ARROW_UP).perform()
-            time.sleep(2)
-            actions.send_keys(Keys.PAGE_UP).perform()
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, 'results-info'))
-            )
-            numbers = driver.find_element(By.CLASS_NAME, 'results-info')
-            condition = numbers.text
-            parts = condition.split()
-            if parts[3] == parts[5]:
-                break
-        else:
-            parts = condition.split()
-            if parts[3] == parts[5]:
-                break
+        # Wyciągnięcie wszystkich linków (elementów <a>) z tej tabeli
+        links = table.find_all('a')
 
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'button.pagination__next[aria-label="click to go to the next page"]'))
-        )
-        next_button = driver.find_element(By.CSS_SELECTOR, 'button.pagination__next[aria-label="click to go to the next page"]')
-        next_button.click()
+        # Wyświetlenie adresów URL
+        for i, link in enumerate(links):
+            if i % 2:
+                href = link.get('href')
+                data_links.append(base_url + href)
 
-    driver.back()  # Wracaj do poprzedniej strony
-    time.sleep(2)  # Opcjonalne: Czekaj 2 sekundy, aby strona się załadowała
+        for key, value in enumerate(data_links):
+            arts = get_links(value)
+            print(len(arts))
+            data[short_names[key+1]] = arts
 
-    WebDriverWait(driver, 5).until(
-        EC.presence_of_element_located((By.ID, 'tablefield-paragraph-8371281-field_table-0'))
-    )
-    table = driver.find_element(By.ID, 'tablefield-paragraph-8371281-field_table-0')  # Znów znajdź tabelę
 
-    WebDriverWait(table, 5).until(
-        EC.presence_of_element_located((By.TAG_NAME, 'a'))
-    )
-    links = table.find_elements(By.TAG_NAME, 'a')  # Znów znajdź linki
-    links_to_click = links[1::2]  # Znów wybierz co drugi link
+    else:
+        print(f'An error has occurred with status {response.status_code}')
+
+    folder_name = 'nasdaq_press_releases'
+    scrape_news(data, folder_name)
+    download_news(folder_name)
+
+
+def download_news(folder_name):
+    dataframes = []
+    for filename in os.listdir(folder_name):
+        if filename.endswith('.csv'):
+            file_path = os.path.join(folder_name, filename)
+            # Wczytywanie pliku CSV do DataFrame
+            df = pd.read_csv(file_path, encoding='utf-8')
+            file_name_without_ext = os.path.splitext(filename)[0]
+            df['source_file'] = file_name_without_ext
+            # Dodawanie DataFrame do listy
+            dataframes.append(df)
+
+    combined_df = pd.concat(dataframes, ignore_index=True)
+    return combined_df
+
+def check_stock_sentiment(df):
+
+    df['Parsed Date'] = df['Published Date'].apply(parse_date)
+    df['adjusted_timestamp'] = df['Parsed Date'].apply(adjust_time)
+    for index, row in df.iterrows():
+
+        #date_start = row['Parsed Date']
+        date_start = pd.Timestamp('2024-08-27 16:30:00')
+        date_end = date_start + timedelta(days=1)
+        company = yf.Ticker(row['source_file'])
+        data = company.history(start= date_start, end = date_end, interval = '5m')
+        open_price = data.iloc[0]['Open']
+        close_price = data.iloc[-1]['Close']
+        print(data)
+        # SPRAWDŻ TIME ZONE
+def parse_date(date_str):
+    # Usuń strefę czasową z daty
+    date_str_without_tz = date_str.rsplit(' ', 1)[0]
+    date_obj = parser.parse(date_str_without_tz)
+    return date_obj
+
+
+def adjust_time(ts):
+    # Przesuwanie godzin dla regularnych dni handlu
+    if ts.time() >= pd.Timestamp('00:00').time() and ts.time() < pd.Timestamp('09:30').time():
+        ts = ts.replace(hour=9, minute=30, second=0)
+    elif ts.time() >= pd.Timestamp('16:00').time() and ts.time() <= pd.Timestamp('23:59').time():
+        ts = ts.replace(hour=16, minute=0, second=0)
+
+    # Zmiana daty, jeśli to sobota (Saturday) lub niedziela (Sunday)
+    if ts.weekday() == 5:  # Sobota
+        ts = ts - pd.Timedelta(days=1)  # Cofamy do piątku
+        ts = ts.replace(hour=16, minute=0, second=0)
+    elif ts.weekday() == 6:  # Niedziela
+        ts = ts + pd.Timedelta(days=1)  # Przesuwamy do poniedziałku
+        ts = ts.replace(hour=9, minute=30, second=0)
+
+    return ts
+
+# Press the green button in the gutter to run the script.
+if __name__ == '__main__':
+    df = download_news('nasdaq_press_releases')
+    check_stock_sentiment(df)
+    #main()
