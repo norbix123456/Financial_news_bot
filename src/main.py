@@ -157,18 +157,74 @@ def download_news(folder_name):
 def check_stock_sentiment(df):
 
     df['Parsed Date'] = df['Published Date'].apply(parse_date)
-    df['adjusted_timestamp'] = df['Parsed Date'].apply(adjust_time)
+    opinion_fin = []
     for index, row in df.iterrows():
 
-        #date_start = row['Parsed Date']
-        date_start = pd.Timestamp('2024-08-27 16:30:00')
-        date_end = date_start + timedelta(days=1)
+        date_start = row['Parsed Date']
+        #date_start = pd.Timestamp('2024-05-27 06:00:00')
+        end_price = 'Close'
+        # Change weekends date
+        date_end = date_start + pd.Timedelta(days=1)
+        if date_start.time() < pd.Timestamp('09:30').time():
+            start_price = 'Close'
+        elif pd.Timestamp('09:30').time() <= date_start.time() < pd.Timestamp('16:00').time():
+            start_price = 'Open'
+        else:
+            start_price = 'Close'
+
+        if date_start.weekday() == 4:
+            if pd.Timestamp('09:30').time() < date_start.time():
+                date_end = date_start + timedelta(days=3)
+        elif date_start.weekday() == 5:
+            if pd.Timestamp('09:30').time() > date_start.time():
+                date_end = date_start + pd.Timedelta(days=3)
+            else:
+                date_end = date_start + pd.Timedelta(days=2)
+                date_start = date_start - pd.Timedelta(days=1)
+                start_price = 'Close'
+        elif date_start.weekday() == 6:
+            if pd.Timestamp('09:30').time() > date_start.time():
+                date_end = date_start + pd.Timedelta(days=2)
+            else:
+                date_end = date_start + pd.Timedelta(days=1)
+                date_start = date_start - pd.Timedelta(days=2)
+                start_price = 'Close'
+        elif date_start.weekday() == 0:
+            if pd.Timestamp('09:30').time() > date_start.time():
+                date_start = date_start - pd.Timedelta(days=3)
+
         company = yf.Ticker(row['source_file'])
-        data = company.history(start= date_start, end = date_end, interval = '5m')
-        open_price = data.iloc[0]['Open']
-        close_price = data.iloc[-1]['Close']
-        print(data)
-        # SPRAWDŻ TIME ZONE
+        data = company.history(start= date_start, end = date_end)
+        if data.shape[0] == 1:
+            if data.index[0].day == date_start.day and data.index[0].month == date_start.month and data.index[0].year == date_start.year:
+                date_end = date_end + timedelta(days=1)
+                if date_end.weekday() == 5:
+                    date_end = date_end + pd.Timedelta(days=2)
+                elif date_end.weekday() == 6:
+                    date_end = date_end + pd.Timedelta(days=2)
+            elif data.index[0].day == date_end.day and data.index[0].month == date_end.month and data.index[0].year == date_end.year:
+                date_start = date_start - pd.Timedelta(days=1)
+                if date_start.weekday() == 6:
+                    if pd.Timestamp('09:30').time() < date_start.time():
+                        date_start = date_start - pd.Timedelta(days=2)
+                        start_price = 'Close'
+                elif date_start.weekday() == 0:
+                    if pd.Timestamp('09:30').time() > date_start.time():
+                        date_start = date_start - pd.Timedelta(days=3)
+            data = company.history(start=date_start, end=date_end)
+        print(index, row)
+        open_price = data.iloc[0][start_price]
+        close_price = data.iloc[-1][end_price]
+        difference = open_price - close_price
+        if -1 < difference < 1:
+            sentiment = 'neutral'
+        elif difference >= 1:
+            sentiment = 'negative'
+        else:
+            sentiment = 'positive'
+        opinion_fin.append(sentiment)
+    df['Financial Sentiment'] = opinion_fin
+    #NIE INTERWAL TYLKO DNIOWY
 def parse_date(date_str):
     # Usuń strefę czasową z daty
     date_str_without_tz = date_str.rsplit(' ', 1)[0]
@@ -176,25 +232,9 @@ def parse_date(date_str):
     return date_obj
 
 
-def adjust_time(ts):
-    # Przesuwanie godzin dla regularnych dni handlu
-    if ts.time() >= pd.Timestamp('00:00').time() and ts.time() < pd.Timestamp('09:30').time():
-        ts = ts.replace(hour=9, minute=30, second=0)
-    elif ts.time() >= pd.Timestamp('16:00').time() and ts.time() <= pd.Timestamp('23:59').time():
-        ts = ts.replace(hour=16, minute=0, second=0)
-
-    # Zmiana daty, jeśli to sobota (Saturday) lub niedziela (Sunday)
-    if ts.weekday() == 5:  # Sobota
-        ts = ts - pd.Timedelta(days=1)  # Cofamy do piątku
-        ts = ts.replace(hour=16, minute=0, second=0)
-    elif ts.weekday() == 6:  # Niedziela
-        ts = ts + pd.Timedelta(days=1)  # Przesuwamy do poniedziałku
-        ts = ts.replace(hour=9, minute=30, second=0)
-
-    return ts
-
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     df = download_news('nasdaq_press_releases')
-    check_stock_sentiment(df)
+    df = check_stock_sentiment(df)
+
     #main()
