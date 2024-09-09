@@ -8,7 +8,7 @@ import math
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 import os
 import pandas as pd
 from datetime import timedelta
@@ -21,15 +21,37 @@ headers = {
         "User-Agent": "Java-http-client/"
     }
 base_url = 'https://www.nasdaq.com'
+urls = ['https://www.nasdaq.com/market-activity/stocks/amd',
+        'https://www.nasdaq.com/market-activity/stocks/tsla',
+        'https://www.nasdaq.com/market-activity/stocks/amzn',
+        'https://www.nasdaq.com/market-activity/stocks/aapl',
+        'https://www.nasdaq.com/market-activity/stocks/nflx',
+        'https://www.nasdaq.com/market-activity/stocks/nvda',
+        'https://www.nasdaq.com/market-activity/stocks/msft',
+        'https://www.nasdaq.com/market-activity/stocks/jd',
+        'https://www.nasdaq.com/market-activity/stocks/csco',
+        'https://www.nasdaq.com/market-activity/stocks/meta']
+
+
 
 def get_links(link):
     data_links = []
     driver = webdriver.Chrome()
     driver.get(link)
-    WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.XPATH, "//div[@class='results-info']"))
-    )
-    results_info = driver.find_element(By.XPATH, "//div[@class='results-info']")
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@class='results-info']"))
+        )
+        time.sleep(3)
+        results_info = driver.find_element(By.XPATH, "//div[@class='results-info']")
+    except TimeoutException:
+        print(f'Element {link} not seen, refreshing...')
+        driver.refresh()
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@class='results-info']"))
+        )
+        time.sleep(3)
+        results_info = driver.find_element(By.XPATH, "//div[@class='results-info']")
     max_number = results_info.text.split()[5]
     page_number = math.ceil((int(max_number) / 10))
     i = 1
@@ -37,11 +59,20 @@ def get_links(link):
         current_page = f'{link}?page={i}&rows_per_page=10'
         driver.get(current_page)
         driver.implicitly_wait(30)
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper'))
-        )
-        time.sleep(2)
-        article_links = driver.find_elements(By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper')
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper'))
+            )
+            time.sleep(2)
+            article_links = driver.find_elements(By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper')
+        except TimeoutException:
+            print(f'Element not seen, refreshing...')
+            driver.refresh()
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper'))
+            )
+            time.sleep(2)
+            article_links = driver.find_elements(By.CSS_SELECTOR, 'a.jupiter22-c-article-list__item_title_wrapper')
         try_again = False
         for linkin in article_links:
             try:
@@ -73,13 +104,13 @@ def get_links(link):
 
     return data_links
 
-def scrape_news(data, folder_name):
+def scrape_press_releases(data, folder_name):
 
     if not os.path.exists(folder_name):
         os.makedirs(folder_name, exist_ok=True)
         print(f"Folder '{folder_name}' został utworzony.")
     for firma, urls in data.items():
-        csv_file_path = os.path.join(folder_name, f'{firma}.csv')
+        csv_file_path = os.path.join(folder_name, f'{firma}_press_releases.csv')
         with open(csv_file_path, 'w', newline='', encoding='utf-8') as csv_file:
             csv_writer = csv.writer(csv_file)
             csv_writer.writerow(['Title', 'Published Date', 'Content'])
@@ -97,8 +128,60 @@ def scrape_news(data, folder_name):
                 csv_writer = csv.writer(csv_file)
                 csv_writer.writerow([title_text, date_text, text])
 
+def scrape_news_headlines(data, folder_name):
+
+    if not os.path.exists(folder_name):
+        os.makedirs(folder_name, exist_ok=True)
+        print(f"Folder '{folder_name}' został utworzony.")
+    for firma, urls in data.items():
+        csv_file_path = os.path.join(folder_name, f'{firma}_nasdaq_news.csv')
+        with open(csv_file_path, 'w', newline='', encoding='utf-8') as csv_file:
+            csv_writer = csv.writer(csv_file)
+            csv_writer.writerow(['Title', 'Topic', 'Published Date', 'Author', 'Company', 'Content'])
+        for i in urls:
+            #i = 'https://www.nasdaq.com/articles/forget-amd-2-tech-stocks-buy-instead-0'
+            response = requests.get(i, headers=headers)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            topic_element = soup.find('meta', {'name': 'com.nasdaq.cms.taxonomy.topic'})
+            topic_value = topic_element.get('content')
+            author_element = soup.find('span', class_='jupiter22-c-author-byline__author-no-link')
+            author_value = author_element.text.strip()
+            company_element = soup.find('span', class_='jupiter22-c-text-link__text')
+            company_value = company_element.text.strip()
+            date_element = soup.find('p', class_='jupiter22-c-author-byline__timestamp')
+            date_text = date_element.text.strip()
+            title_element = soup.find('h1', class_='jupiter22-c-hero-article-title')
+            title_text = title_element.text.strip()
+            div_content = soup.find('div', class_='body__content')
+            text = div_content.get_text(separator="\n")
+
+            with open(csv_file_path, 'a', newline='', encoding='utf-8') as csv_file:
+                csv_writer = csv.writer(csv_file)
+                csv_writer.writerow([title_text, topic_value, date_text, author_value,company_value, text])
+
 
 def main():
+
+    short_names = ['AMD', 'TSLA', 'AMZN', 'AAPL', 'NFLX', 'NVDA', 'MSFT', 'JD', 'CSCO', 'META']
+    news_category = 'Nasdaq News'
+    data = {}
+    if news_category == 'Press Releases':
+        for i, url in enumerate(urls):
+            category_url = f'{url}/press-releases'
+            obtained_links = get_links(category_url)
+            print(len(obtained_links))
+            data[short_names[i]] = obtained_links
+        folder_name = 'nasdaq_press_releases_v2'
+        scrape_press_releases(data, folder_name)
+    elif news_category == 'Nasdaq News':
+        for i, url in enumerate(urls):
+            category_url = f'{url}/news-headlines'
+            obtained_links = get_links(category_url)
+            print(len(obtained_links))
+            data[short_names[i]] = obtained_links
+        folder_name = 'nasdaq_news_headlines'
+        scrape_news_headlines(data, folder_name)
+    print(data)
 
     category_url = f'{base_url}/market-activity/quotes/press-releases'
     response = requests.get(category_url, headers=headers)
@@ -134,8 +217,8 @@ def main():
     else:
         print(f'An error has occurred with status {response.status_code}')
 
-    folder_name = 'nasdaq_press_releases'
-    scrape_news(data, folder_name)
+    folder_name = 'nasdaq_press_releases_v2'
+    scrape_press_releases(data, folder_name)
     download_news(folder_name)
 
 
@@ -234,7 +317,7 @@ def parse_date(date_str):
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    df = download_news('nasdaq_press_releases')
-    df = check_stock_sentiment(df)
+    #df = download_news('nasdaq_press_releases')
+    #df = check_stock_sentiment(df)
 
-    #main()
+    main()
