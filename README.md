@@ -1,5 +1,9 @@
 # Nasdaq news crawler
 Nasdaq News Crawler is a Python library designed to facilitate the collection and sentiment analysis of financial news and press releases published on the Nasdaq website. This tool allows users to efficiently gather information about selected companies, perform sentiment analysis on the collected data using FinBERT model, and gain insights into how news might impact stock prices.
+
+## Library Link
+The library is available on PyPI: [Nasdaq News Crawler](https://pypi.org/project/nasdaq-news-crawler/)
+
 ## Instalation
 ```
 pip install nasdaq-news-crawler
@@ -111,3 +115,6 @@ print(f"Sentiment analysis result: {result}")
 - Collects news and press releases for specific companies listed on NASDAQ.
 - Performs sentiment analysis using the FinBERT model.
 -  CUDA acceleration for faster analysis.
+
+### License
+This project is licensed under the MIT License.
